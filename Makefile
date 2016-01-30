@@ -16,7 +16,7 @@ AS = $(ARCH)-as
 OBJCOPY = $(ARCH)-objcopy
 EMU = vbam
 
-opt = -O3 -fomit-frame-pointer -mcpu=arm7tdmi -mtune=arm7tdmi
+opt = -O3 -fomit-frame-pointer -mcpu=arm7tdmi -mtune=arm7tdmi -mthumb
 #dbg = -g
 
 CFLAGS = $(opt) $(dbg) -pedantic -Wall -I. -I../gbasys/src

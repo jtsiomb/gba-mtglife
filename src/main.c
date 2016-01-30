@@ -7,12 +7,14 @@
 
 static int init(void);
 static void draw(void);
-static void draw_number(int font, int x, int y, int num, unsigned int r, unsigned int g, unsigned int b, unsigned int alpha);
+static void draw_number(int font, int x, int y, int num, unsigned int r, unsigned int g, unsigned int b);
 static void keypress(unsigned short key);
 static void keyb_intr(void);
 static void blend_alpha(struct pixel_buffer *src, int src_x, int src_y, int src_w, int src_h,
 		struct pixel_buffer *dst, int dst_x, int dst_y, unsigned int r, unsigned int g,
 		unsigned int b, unsigned int alpha);
+static void blit_color(struct pixel_buffer *src, int src_x, int src_y, int src_w, int src_h,
+		struct pixel_buffer *dst, int dst_x, int dst_y, unsigned int r, unsigned int g, unsigned int b);
 
 static int score[2] = {20, 20};
 static int delta;
@@ -91,14 +93,16 @@ static void draw(void)
 	sintm = sin_int(msec / 4);
 	pulse = (sintm + SINLUT_SCALE) / 2 * 128 / SINLUT_SCALE + 128;
 
-	draw_number(FONT_LARGE, 60, 90, score[0], 255, 255, 255, edit == 0 ? pulse : 255);
-	draw_number(FONT_LARGE, 120 + 60, 90, score[1], 255, 255, 255, edit == 1 ? pulse : 255);
+	unsigned int color = edit == 0 ? pulse : 255;
+	draw_number(FONT_LARGE, 50, 90, score[0], color, color, color);
+	color = edit == 1 ? pulse : 255;
+	draw_number(FONT_LARGE, 240 - 50, 90, score[1], color, color, color);
 
 	if(edit == -1 && delta != 0) {
 		int r = delta < 0 ? 255 : pulse / 2;
 		int g = delta > 0 ? 255 : pulse / 2;
 		int b = pulse / 4;
-		draw_number(FONT_SMALL, 120, 25, delta, r, g, b, 255);
+		draw_number(FONT_SMALL, 120, 25, delta, r, g, b);
 	}
 
 	flip();
@@ -131,7 +135,7 @@ static void fill_rect(struct pixel_buffer *pbuf, int x, int y, int width, int he
 	}
 }
 
-static void draw_number(int font, int x, int y, int num, unsigned int r, unsigned int g, unsigned int b, unsigned int alpha)
+static void draw_number(int font, int x, int y, int num, unsigned int r, unsigned int g, unsigned int b)
 {
 	int i;
 	int font_width = pbuf_num[font].x / 10;
@@ -151,8 +155,8 @@ static void draw_number(int font, int x, int y, int num, unsigned int r, unsigne
 		num /= 10;
 
 		x -= font_width;
-		blend_alpha(pbuf_num + font, digit * font_width, 0, font_width, font_height,
-				back_buffer, x, y, r, g, b, alpha);
+		blit_color(pbuf_num + font, digit * font_width, 0, font_width, font_height,
+				back_buffer, x, y, r, g, b);
 	}
 
 	if(neg) {
@@ -262,3 +266,42 @@ static void blend_alpha(struct pixel_buffer *src, int src_x, int src_y, int src_
 	}
 }
 
+static void blit_color(struct pixel_buffer *src, int src_x, int src_y, int src_w, int src_h,
+		struct pixel_buffer *dst, int dst_x, int dst_y, unsigned int r, unsigned int g, unsigned int b)
+{
+	int i, j, width, height, dstride, sstride;
+	unsigned short *dptr, *sptr;
+
+	if(src_w <= 0)
+		src_w = src->x;
+	if(src_h <= 0)
+		src_h = src->y;
+
+	width = MIN(src_w, MIN(src->x - src_x, dst->x - dst_x));
+	height = MIN(src_h, MIN(src->y - src_y, dst->y - dst_y));
+
+	if(width <= 0 || height <= 0)
+		return;
+
+	dptr = (unsigned short*)dst->pixels + (dst_y * dst->x + dst_x);
+	sptr = (unsigned short*)src->pixels + (src_y * src->x + src_x);
+
+	dstride = dst->x;
+	sstride = src->x;
+
+	for(i=0; i<height; i++) {
+		for(j=0; j<width; j++) {
+			unsigned short pix = *sptr++;
+
+			unsigned int val = GET_B(pix);
+
+			unsigned int pr = (r * val) >> 8;
+			unsigned int pg = (g * val) >> 8;
+			unsigned int pb = (b * val) >> 8;
+
+			*dptr++ = RGB(pr, pg, pb);
+		}
+		sptr += sstride - width;
+		dptr += dstride - width;
+	}
+}
