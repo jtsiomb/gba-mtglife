@@ -1,24 +1,25 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "gbasys.h"
+#include "gfx.h"
 #include "sincos.h"
 #include "logger.h"
 #include "data.h"
+#include "dynarr.h"
 
 static int init(void);
 static void draw(void);
 static void draw_number(int font, int x, int y, int num, unsigned int r, unsigned int g, unsigned int b);
+static void draw_number_half(int font, int x, int y, int num, unsigned int r, unsigned int g, unsigned int b);
 static void keypress(unsigned short key);
 static void keyb_intr(void);
-static void blend_alpha(struct pixel_buffer *src, int src_x, int src_y, int src_w, int src_h,
-		struct pixel_buffer *dst, int dst_x, int dst_y, unsigned int r, unsigned int g,
-		unsigned int b, unsigned int alpha);
-static void blit_color(struct pixel_buffer *src, int src_x, int src_y, int src_w, int src_h,
-		struct pixel_buffer *dst, int dst_x, int dst_y, unsigned int r, unsigned int g, unsigned int b);
 
 static int score[2] = {20, 20};
 static int delta;
 static int edit = -1;
+static int *history[2];
+static int hist_edit = -1;
+static int hist_sel = -1;
 
 #define FONT_LARGE	0
 #define FONT_SMALL	1
@@ -79,13 +80,21 @@ static int init(void)
 	pbuf_bg.y = bg_height;
 	pbuf_bg.bpp = bg_bpp;
 	pbuf_bg.pixels = (void*)bg_pixels;
+
+	history[0] = dynarr_alloc(0, sizeof *history[0]);
+	history[1] = dynarr_alloc(0, sizeof *history[1]);
+	if(!history[0] || !history[1]) {
+		logmsg(LOG_ALL, "failed to allocate memory\n");
+		return -1;
+	}
 	return 0;
 }
 
 static void draw(void)
 {
 	int16_t sintm;
-	int pulse;
+	int i, pulse;
+	static int xpos[2] = {50, 240 - 50};
 	unsigned long msec = get_millisec();
 
 	copy_buffer(&pbuf_bg, back_buffer);
@@ -93,15 +102,41 @@ static void draw(void)
 	sintm = sin_int(msec / 4);
 	pulse = (sintm + SINLUT_SCALE) / 2 * 128 / SINLUT_SCALE + 128;
 
-	unsigned int color = edit == 0 ? pulse : 255;
-	draw_number(FONT_LARGE, 50, 90, score[0], color, color, color);
-	color = edit == 1 ? pulse : 255;
-	draw_number(FONT_LARGE, 240 - 50, 90, score[1], color, color, color);
+	for(i=0; i<2; i++) {
+		unsigned int color;
+		int j, hsz, x, y, value;
+		int hist_dir_sign = i >= 1 ? 1 : -1;
+
+		hsz = dynarr_size(history[i]);
+
+		x = xpos[i];
+		y = 60;
+		for(j=0; j<3; j++) {
+			int idx = hsz - j - 1;
+			if(hist_edit == i) {
+				idx -= hist_sel + 1;
+			}
+			if(idx < 0) break;
+			color = 128 - 32 * j;
+			draw_number_half(FONT_SMALL, x, y, history[i][idx], color, color, hist_edit == i ? 32 : color);
+			x += 5 * hist_dir_sign;
+			y -= 16;
+		}
+
+		color = edit == i ? pulse : 255;
+		if(hist_edit == i && hist_sel >= 0) {
+			int hsz = dynarr_size(history[i]);
+			value = history[i][hsz - hist_sel - 1];
+		} else {
+			value = score[i];
+		}
+		draw_number(FONT_LARGE, xpos[i], 100, value, hist_edit == i ? color / 4 : color, color, color);
+	}
 
 	if(edit == -1 && delta != 0) {
-		int r = delta < 0 ? 255 : pulse / 2;
-		int g = delta > 0 ? 255 : pulse / 2;
-		int b = pulse / 4;
+		int r = (delta < 0 ? 255 : 64) * pulse >> 8;
+		int g = (delta > 0 ? 255 : 64) * pulse >> 8;
+		int b = (32 * pulse) >> 8;
 		draw_number(FONT_SMALL, 120, 25, delta, r, g, b);
 	}
 
@@ -164,39 +199,119 @@ static void draw_number(int font, int x, int y, int num, unsigned int r, unsigne
 	}
 }
 
+static void draw_number_half(int font, int x, int y, int num, unsigned int r, unsigned int g, unsigned int b)
+{
+	int i;
+	int font_width = pbuf_num[font].x / 10;
+	int font_height = pbuf_num[font].y;
+	int dcount = count_digits(num);
+	int width = dcount * font_width;
+	int neg = num < 0;
+	num = abs(num);
+
+	if(dcount < 1) dcount = 1;
+
+	x += width / 4;
+	y -= font_height / 4;
+
+	for(i=0; i<dcount; i++) {
+		int digit = num % 10;
+		num /= 10;
+
+		x -= font_width / 2;
+		blit_color_half(pbuf_num + font, digit * font_width, 0, font_width, font_height,
+				back_buffer, x, y, r, g, b);
+	}
+
+	if(neg) {
+		fill_rect(back_buffer, x - 8, y + font_height / 2 - 1, 5, 2, RGB(r, g, b));
+	}
+}
+
 static void keypress(unsigned short key)
 {
+	static int idx, prev;
+
 	switch(key) {
-	case KEY_B:
-		edit = edit == -1 ? 0 : -1;
-		break;
 	case KEY_A:
-		edit = edit == -1 ? 1 : -1;
+	case KEY_B:
+		if(hist_edit >= 0) {	/* in history edit mode */
+			if(key == KEY_A && hist_sel >= 0) {
+				/* confirm history edit */
+				int idx = hist_edit;
+				int hsz = dynarr_size(history[idx]);
+				score[idx] = history[idx][hsz - hist_sel - 1];
+				history[idx] = dynarr_resize(history[idx], hsz - hist_sel - 1);
+				hist_edit = hist_sel = -1;
+			} else {
+				/* cancel history edit */
+				hist_edit = hist_sel = -1;
+			}
+
+		} else if(edit >= 0) {	/* in direct score edit mode */
+			if(score[edit] != prev) {
+				history[edit] = dynarr_push(history[edit], &prev);
+			}
+			edit = -1;
+		} else {
+			edit = key == KEY_A ? 1 : 0;
+			prev = score[edit];
+		}
 		break;
 
 	case KEY_UP:
-		if(edit == -1) {
-			++delta;
-		} else {
+		if(edit >= 0) {	/* in direct score edit mode */
 			++score[edit];
+		} else if(hist_edit >= 0) {	/* in history edit mode */
+			if(hist_sel < dynarr_size(history[hist_edit]) - 1) {
+				++hist_sel;
+			}
+		} else {
+			++delta;
 		}
 		break;
 
 	case KEY_DOWN:
-		if(edit == -1) {
-			--delta;
-		} else {
+		if(edit >= 0) {	/* in direct score edit mode */
 			--score[edit];
+		} else if(hist_edit >= 0) {	/* in history edit mode */
+			if(hist_sel >= 0) {
+				--hist_sel;
+			}
+		} else {
+			--delta;
 		}
 		break;
 
 	case KEY_LEFT:
-		score[0] += delta;
-		delta = 0;
+	case KEY_RIGHT:
+		if(delta != 0) {
+			idx = key == KEY_RIGHT ? 1 : 0;
+			history[idx] = dynarr_push(history[idx], &score[idx]);
+			score[idx] += delta;
+			delta = 0;
+		}
 		break;
 
-	case KEY_RIGHT:
-		score[1] += delta;
+	case KEY_L:
+	case KEY_R:
+		idx = key == KEY_R ? 1 : 0;
+		if(hist_edit == -1) {
+			/* start history edit (if there is any) */
+			if(!dynarr_empty(history[idx])) {
+				hist_edit = idx;
+				hist_sel = -1;
+			}
+		} else {
+			/* cancel history edit */
+			hist_edit = hist_sel = -1;
+		}
+		break;
+
+	case KEY_START:
+		score[0] = score[1] = 20;
+		history[0] = dynarr_clear(history[0]);
+		history[1] = dynarr_clear(history[1]);
 		delta = 0;
 		break;
 	}
@@ -221,87 +336,4 @@ static void keyb_intr(void)
 	}
 }
 
-#define MIN(a, b)	((a) < (b) ? (a) : (b))
 
-static void blend_alpha(struct pixel_buffer *src, int src_x, int src_y, int src_w, int src_h,
-		struct pixel_buffer *dst, int dst_x, int dst_y, unsigned int r, unsigned int g,
-		unsigned int b, unsigned int alpha)
-{
-	int i, j, width, height, dstride, sstride;
-	unsigned short *dptr, *sptr;
-
-	if(src_w <= 0)
-		src_w = src->x;
-	if(src_h <= 0)
-		src_h = src->y;
-
-	width = MIN(src_w, MIN(src->x - src_x, dst->x - dst_x));
-	height = MIN(src_h, MIN(src->y - src_y, dst->y - dst_y));
-
-	if(width <= 0 || height <= 0)
-		return;
-
-	dptr = (unsigned short*)dst->pixels + (dst_y * dst->x + dst_x);
-	sptr = (unsigned short*)src->pixels + (src_y * src->x + src_x);
-
-	dstride = dst->x;
-	sstride = src->x;
-
-	for(i=0; i<height; i++) {
-		for(j=0; j<width; j++) {
-			unsigned short dpix = *dptr;
-			unsigned short spix = *sptr++;
-
-			unsigned int a = (GET_B(spix) * alpha) >> 8;
-			unsigned int inv_a = 256 - a;
-
-			unsigned int dr = (r * a + GET_R(dpix) * inv_a) >> 8;
-			unsigned int dg = (g * a + GET_G(dpix) * inv_a) >> 8;
-			unsigned int db = (b * a + GET_B(dpix) * inv_a) >> 8;
-
-			*dptr++ = RGB(dr, dg, db);
-		}
-		sptr += sstride - width;
-		dptr += dstride - width;
-	}
-}
-
-static void blit_color(struct pixel_buffer *src, int src_x, int src_y, int src_w, int src_h,
-		struct pixel_buffer *dst, int dst_x, int dst_y, unsigned int r, unsigned int g, unsigned int b)
-{
-	int i, j, width, height, dstride, sstride;
-	unsigned short *dptr, *sptr;
-
-	if(src_w <= 0)
-		src_w = src->x;
-	if(src_h <= 0)
-		src_h = src->y;
-
-	width = MIN(src_w, MIN(src->x - src_x, dst->x - dst_x));
-	height = MIN(src_h, MIN(src->y - src_y, dst->y - dst_y));
-
-	if(width <= 0 || height <= 0)
-		return;
-
-	dptr = (unsigned short*)dst->pixels + (dst_y * dst->x + dst_x);
-	sptr = (unsigned short*)src->pixels + (src_y * src->x + src_x);
-
-	dstride = dst->x;
-	sstride = src->x;
-
-	for(i=0; i<height; i++) {
-		for(j=0; j<width; j++) {
-			unsigned short pix = *sptr++;
-
-			unsigned int val = GET_B(pix);
-
-			unsigned int pr = (r * val) >> 8;
-			unsigned int pg = (g * val) >> 8;
-			unsigned int pb = (b * val) >> 8;
-
-			*dptr++ = RGB(pr, pg, pb);
-		}
-		sptr += sstride - width;
-		dptr += dstride - width;
-	}
-}
