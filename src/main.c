@@ -8,10 +8,12 @@
 #include "dynarr.h"
 
 static int init(void);
-static void draw(void);
+static void draw_scr_main(void);
+static void draw_scr_graph(void);
 static void draw_number(int font, int x, int y, int num, unsigned int r, unsigned int g, unsigned int b);
 static void draw_number_half(int font, int x, int y, int num, unsigned int r, unsigned int g, unsigned int b);
-static void keypress(unsigned short key);
+static void keypress_scr_main(unsigned short key);
+static void keypress_scr_graph(unsigned short key);
 static void keyb_intr(void);
 
 static int score[2] = {20, 20};
@@ -20,6 +22,7 @@ static int edit = -1;
 static int *history[2];
 static int hist_edit = -1;
 static int hist_sel = -1;
+static int show_graph;
 
 #define FONT_LARGE	0
 #define FONT_SMALL	1
@@ -51,12 +54,21 @@ int main(void)
 		while(evhead != evtail) {
 			unsigned short ev = events[evhead];
 			evhead = (evhead + 1) % EVQ_SIZE;
-			keypress(ev);
+
+			if(show_graph) {
+				keypress_scr_graph(ev);
+			} else {
+				keypress_scr_main(ev);
+			}
 		}
 
 		keystate = get_key_state(KEY_ALL);
 
-		draw();
+		if(show_graph) {
+			draw_scr_graph();
+		} else {
+			draw_scr_main();
+		}
 	}
 	return 0;
 }
@@ -90,7 +102,7 @@ static int init(void)
 	return 0;
 }
 
-static void draw(void)
+static void draw_scr_main(void)
 {
 	int16_t sintm;
 	int i, pulse;
@@ -138,6 +150,52 @@ static void draw(void)
 		int g = (delta > 0 ? 255 : 64) * pulse >> 8;
 		int b = (32 * pulse) >> 8;
 		draw_number(FONT_SMALL, 120, 25, delta, r, g, b);
+	}
+
+	flip();
+}
+
+static void draw_scr_graph(void)
+{
+	static const int maxy = 160;
+	int i, j, range, baseline, yscale, min_score = score[0], max_score = score[0];
+	static const unsigned short col[2] = { RGB(255, 128, 85), RGB(64, 75, 255) };
+	static const unsigned short bgcol = RGB(128, 128, 128);
+
+	clear_buffer(back_buffer, bgcol);
+
+	set_text_writebg(1);
+	set_text_color(col[0], bgcol);
+	draw_string("Player 1", 10, 5, back_buffer);
+	set_text_color(col[1], bgcol);
+	draw_string("Player 2", 128, 5, back_buffer);
+
+	for(i=0; i<2; i++) {
+		int hsz = dynarr_size(history[i]);
+		for(j=0; j<hsz; j++) {
+			int s = history[i][j];
+			if(s < min_score) min_score = s;
+			if(s > max_score) max_score = s;
+		}
+	}
+
+	if(min_score > 0) min_score = 0;
+
+	range = max_score - min_score;
+	yscale = 150 / range;
+	baseline = -min_score * yscale;
+
+	for(i=0; i<2; i++) {
+		int hsz = dynarr_size(history[i]);
+		int dx = 200 / hsz;
+
+		int x = 20;
+		for(j=0; j<hsz-1; j++) {
+			int y0 = maxy - baseline - history[i][j] * range;
+			int y1 = maxy - baseline - history[i][j + 1] * range;
+			draw_line(x, y0, x + dx, y1, col[i], back_buffer);
+			x += dx;
+		}
 	}
 
 	flip();
@@ -228,7 +286,7 @@ static void draw_number_half(int font, int x, int y, int num, unsigned int r, un
 	}
 }
 
-static void keypress(unsigned short key)
+static void keypress_scr_main(unsigned short key)
 {
 	static int idx, prev;
 
@@ -314,6 +372,22 @@ static void keypress(unsigned short key)
 		history[1] = dynarr_clear(history[1]);
 		delta = 0;
 		break;
+
+	case KEY_SELECT:
+		show_graph = 1;
+		history[0] = dynarr_push(history[0], &score[0]);
+		history[1] = dynarr_push(history[1], &score[1]);
+		break;
+	}
+}
+
+static void keypress_scr_graph(unsigned short key)
+{
+	switch(key) {
+	case KEY_SELECT:
+		show_graph = 0;
+		history[0] = dynarr_pop(history[0]);
+		history[1] = dynarr_pop(history[1]);
 	}
 }
 
