@@ -7,22 +7,33 @@
 #include "data.h"
 #include "dynarr.h"
 
+struct vertex {
+	int x, y;
+};
+
 static int init(void);
+static int reset(void);
 static void draw_scr_main(void);
 static void draw_scr_graph(void);
+static void fill_rect(struct pixel_buffer *pbuf, int x, int y, int width, int height, unsigned short color);
 static void draw_number(int font, int x, int y, int num, unsigned int r, unsigned int g, unsigned int b);
 static void draw_number_half(int font, int x, int y, int num, unsigned int r, unsigned int g, unsigned int b);
 static void keypress_scr_main(unsigned short key);
 static void keypress_scr_graph(unsigned short key);
 static void keyb_intr(void);
+static void build_curves(void);
 
-static int score[2] = {20, 20};
+static int starting_life = 20;
+static int score[2];
 static int delta;
-static int edit = -1;
+static int edit;
 static int *history[2];
-static int hist_edit = -1;
-static int hist_sel = -1;
+static int hist_edit;
+static int hist_sel;
 static int show_graph;
+static struct vertex *curve[2];
+
+#define CURVES_BASELINE	10
 
 #define FONT_LARGE	0
 #define FONT_SMALL	1
@@ -47,6 +58,21 @@ int main(void)
 
 	if(init() == -1) {
 		return 1;
+	}
+
+	{
+		static unsigned short dbg_input[] = {KEY_DOWN, KEY_LEFT, KEY_DOWN, KEY_RIGHT,
+			KEY_DOWN, KEY_DOWN, KEY_DOWN, KEY_LEFT, KEY_DOWN, KEY_DOWN, KEY_RIGHT,
+			KEY_DOWN, KEY_DOWN, KEY_DOWN, KEY_LEFT,	KEY_DOWN, KEY_RIGHT,
+			KEY_DOWN, KEY_DOWN, KEY_DOWN, KEY_DOWN, KEY_DOWN, KEY_DOWN, KEY_DOWN, KEY_RIGHT,
+			KEY_DOWN, KEY_DOWN, KEY_LEFT,
+			KEY_DOWN, KEY_DOWN, KEY_DOWN, KEY_DOWN, KEY_DOWN, KEY_DOWN, KEY_DOWN, KEY_DOWN, KEY_DOWN, KEY_DOWN, KEY_DOWN, KEY_DOWN, KEY_RIGHT,
+			KEY_ALL
+		};
+		int i;
+		for(i=0; dbg_input[i] != KEY_ALL; i++) {
+			keypress_scr_main(dbg_input[i]);
+		}
 	}
 
 	for(;;) {
@@ -93,11 +119,26 @@ static int init(void)
 	pbuf_bg.bpp = bg_bpp;
 	pbuf_bg.pixels = (void*)bg_pixels;
 
-	history[0] = dynarr_alloc(0, sizeof *history[0]);
-	history[1] = dynarr_alloc(0, sizeof *history[1]);
-	if(!history[0] || !history[1]) {
-		logmsg(LOG_ALL, "failed to allocate memory\n");
-		return -1;
+	return reset();
+}
+
+static int reset(void)
+{
+	int i;
+
+	score[0] = score[1] = starting_life;
+	delta = 0;
+	edit = -1;
+	hist_edit = hist_sel = -1;
+	show_graph = 0;
+
+	for(i=0; i<2; i++) {
+		dynarr_free(history[i]);
+		history[i] = dynarr_alloc(0, sizeof *history[i]);
+		if(!history[i]) {
+			logmsg(LOG_ALL, "failed to allocate memory\n");
+			return -1;
+		}
 	}
 	return 0;
 }
@@ -105,14 +146,13 @@ static int init(void)
 static void draw_scr_main(void)
 {
 	int16_t sintm;
-	int i, pulse;
+	int i;
 	static int xpos[2] = {50, 240 - 50};
 	unsigned long msec = get_millisec();
 
 	copy_buffer(&pbuf_bg, back_buffer);
 
 	sintm = sin_int(msec / 4);
-	pulse = (sintm + SINLUT_SCALE) / 2 * 128 / SINLUT_SCALE + 128;
 
 	for(i=0; i<2; i++) {
 		unsigned int color;
@@ -135,7 +175,11 @@ static void draw_scr_main(void)
 			y -= 16;
 		}
 
-		color = edit == i ? pulse : 255;
+		if(edit == i) {
+			color = (sintm + SINLUT_SCALE) / 2 * 128 / SINLUT_SCALE + 128;
+		} else {
+			color = 255;
+		}
 		if(hist_edit == i && hist_sel >= 0) {
 			int hsz = dynarr_size(history[i]);
 			value = history[i][hsz - hist_sel - 1];
@@ -146,6 +190,7 @@ static void draw_scr_main(void)
 	}
 
 	if(edit == -1 && delta != 0) {
+		int pulse = (sintm + SINLUT_SCALE) / 2 * 64 / SINLUT_SCALE + 192;
 		int r = (delta < 0 ? 255 : 64) * pulse >> 8;
 		int g = (delta > 0 ? 255 : 64) * pulse >> 8;
 		int b = (32 * pulse) >> 8;
@@ -157,10 +202,11 @@ static void draw_scr_main(void)
 
 static void draw_scr_graph(void)
 {
-	static const int maxy = 160;
-	int i, j, range, baseline, yscale, min_score = score[0], max_score = score[0];
-	static const unsigned short col[2] = { RGB(255, 128, 85), RGB(64, 75, 255) };
-	static const unsigned short bgcol = RGB(128, 128, 128);
+	static const unsigned short col[2] = { RGB(255, 75, 64), RGB(64, 255, 75) };
+	static const unsigned short bgcol = 0;/*RGB(128, 128, 128);*/
+	static const unsigned short axis_col = RGB(160, 160, 160);
+	unsigned short *pixels = back_buffer->pixels;
+	int i, j, k, baseline_y = 160 - CURVES_BASELINE;
 
 	clear_buffer(back_buffer, bgcol);
 
@@ -168,33 +214,33 @@ static void draw_scr_graph(void)
 	set_text_color(col[0], bgcol);
 	draw_string("Player 1", 10, 5, back_buffer);
 	set_text_color(col[1], bgcol);
-	draw_string("Player 2", 128, 5, back_buffer);
+	draw_string("Player 2", 160, 5, back_buffer);
+
+	dma_fill16(3, pixels + baseline_y * 240 + 20, axis_col, 200);
+	dma_fill16(3, pixels + curve[0][0].y * 240 + 20, RGB(80, 80, 80), 200);
+	draw_line(20, baseline_y, 20, 20, axis_col, back_buffer);
 
 	for(i=0; i<2; i++) {
-		int hsz = dynarr_size(history[i]);
+		int hsz = dynarr_size(history[i]) + 1;	/* history & current score */
+
 		for(j=0; j<hsz; j++) {
-			int s = history[i][j];
-			if(s < min_score) min_score = s;
-			if(s > max_score) max_score = s;
-		}
-	}
+			struct vertex v0 = curve[i][j];
 
-	if(min_score > 0) min_score = 0;
+			if(v0.y > 0 && v0.y < back_buffer->y - 1) {
+				unsigned short *pptr = pixels + v0.y * back_buffer->x + v0.x - 1;
+				for(k=0; k<3; k++) {
+					*pptr = pptr[-back_buffer->x] = pptr[back_buffer->x] = col[i];
+					++pptr;
+				}
+			}
 
-	range = max_score - min_score;
-	yscale = 150 / range;
-	baseline = -min_score * yscale;
+			if(j < hsz - 1) {
+				struct vertex v1 = curve[i][j + 1];
+				if(clip_line(&v0.x, &v0.y, &v1.x, &v1.y, 0, 0, 240, 158)) {
+					draw_line(v0.x, v0.y, v1.x, v1.y, col[i], back_buffer);
+				}
+			}
 
-	for(i=0; i<2; i++) {
-		int hsz = dynarr_size(history[i]);
-		int dx = 200 / hsz;
-
-		int x = 20;
-		for(j=0; j<hsz-1; j++) {
-			int y0 = maxy - baseline - history[i][j] * range;
-			int y1 = maxy - baseline - history[i][j + 1] * range;
-			draw_line(x, y0, x + dx, y1, col[i], back_buffer);
-			x += dx;
 		}
 	}
 
@@ -367,16 +413,12 @@ static void keypress_scr_main(unsigned short key)
 		break;
 
 	case KEY_START:
-		score[0] = score[1] = 20;
-		history[0] = dynarr_clear(history[0]);
-		history[1] = dynarr_clear(history[1]);
-		delta = 0;
+		reset();
 		break;
 
 	case KEY_SELECT:
+		build_curves();
 		show_graph = 1;
-		history[0] = dynarr_push(history[0], &score[0]);
-		history[1] = dynarr_push(history[1], &score[1]);
 		break;
 	}
 }
@@ -386,16 +428,68 @@ static void keypress_scr_graph(unsigned short key)
 	switch(key) {
 	case KEY_SELECT:
 		show_graph = 0;
-		history[0] = dynarr_pop(history[0]);
-		history[1] = dynarr_pop(history[1]);
 	}
 }
+
+static void build_curves(void)
+{
+	static const int maxy = 160;
+	int i, j, range, yscale, max_score = starting_life;
+
+	for(i=0; i<2; i++) {
+		if(!(history[i] = dynarr_push(history[i], &score[i]))) {
+			panic("build_curves: failed to push score");
+		}
+
+		free(curve[i]);
+		if(!(curve[i] = malloc(dynarr_size(history[i]) * sizeof *curve[i]))) {
+			panic("build_curves: failed to allocate curve");
+		}
+	}
+
+	for(i=0; i<2; i++) {
+		int hsz = dynarr_size(history[i]);
+		for(j=0; j<hsz; j++) {
+			int s = history[i][j];
+			if(s > max_score)
+				max_score = s;
+		}
+	}
+
+	range = max_score + CURVES_BASELINE;
+	yscale = 200 / range;
+
+	for(i=0; i<2; i++) {
+		int hsz = dynarr_size(history[i]);
+		int dx = 200 / (hsz - 1);
+
+		int x = 20;
+		for(j=0; j<hsz; j++) {
+			struct vertex *v = curve[i] + j;
+
+			v->x = x;
+			v->y = maxy - CURVES_BASELINE - history[i][j] * yscale;
+			x += dx;
+		}
+	}
+
+	history[0] = dynarr_pop(history[0]);
+	history[1] = dynarr_pop(history[1]);
+}
+
 
 static void keyb_intr(void)
 {
 	int i;
 	unsigned short prev_keystate = keystate;
 	unsigned short diff;
+	static unsigned int prev_intr;
+
+	unsigned int msec = get_millisec();
+	if(msec - prev_intr < 128) {
+		return;
+	}
+	prev_intr = msec;
 
 	keystate = get_key_state(KEY_ALL);
 	diff = keystate ^ prev_keystate;
@@ -409,5 +503,3 @@ static void keyb_intr(void)
 		}
 	}
 }
-
-

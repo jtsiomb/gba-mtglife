@@ -2,7 +2,7 @@ src = $(wildcard src/*.c)
 imgfiles = $(wildcard *.png)
 obj = $(src:.c=.o) $(imgfiles:.png=.img.o)
 dep = $(obj:.o=.d)
-name = gbamtg
+name = mtglife
 elf = $(name).elf
 bin = $(name).gba
 elf_mb = $(name)_mb.elf
