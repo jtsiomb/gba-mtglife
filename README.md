@@ -11,6 +11,8 @@ typical android phone battery.
 That's why I decided to write a *GameBoy Advance* life counter.  The GBA SP in
 particular is very compact, and its battery lasts forever.
 
+Web site: http://nuclear.mutantstargoat.com/sw/gba-mtglife
+
 License
 -------
 Copyright (C) 2016 John Tsiombikas <nuclear@member.fsf.org>
