@@ -503,7 +503,7 @@ static void keyb_intr(void)
 	static unsigned int prev_intr;
 
 	unsigned int msec = get_millisec();
-	if(msec - prev_intr < 128) {
+	if(msec - prev_intr < 98) {
 		return;
 	}
 	prev_intr = msec;
